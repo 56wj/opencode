@@ -1,14 +1,33 @@
 import { describe, expect } from "bun:test"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { Agent } from "@opencode/core/agent"
+import { Config } from "@opencode/core/config"
 import { Location } from "@opencode/core/location"
 import { AbsolutePath } from "@opencode/core/schema"
+import { Session } from "@opencode/core/session"
+import { SessionMessage } from "@opencode/core/session/message"
 import { Tool } from "@opencode/core/tool"
-import { Effect, Schema } from "effect"
+import { Config as SchemaConfig } from "@opencode/schema/config"
+import { ConfigCodeMode } from "@opencode/schema/config/codemode"
+import { Effect, Fiber, Schema } from "effect"
 import type { Info } from "@opencode/schema/tool"
+import { TestClock } from "effect/testing"
 import { it } from "./lib/effect"
 
 const toolNode = AppNodeBuilder.build(Tool.node, [
   Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
+])
+
+const timeoutNode = AppNodeBuilder.build(Tool.node, [
+  Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
+  Config.node.replace(
+    Config.testLayer([
+      new SchemaConfig.Document({
+        type: "document",
+        info: new SchemaConfig.Info({ codemode: new ConfigCodeMode.Info({ timeout: 1 }) }),
+      }),
+    ]),
+  ),
 ])
 
 describe("CodeMode", () => {
@@ -91,5 +110,37 @@ describe("CodeMode", () => {
       expect(direct).toContain('{"anyOf":[{"type":"number"},{"type":"string","enum":["Infinity","-Infinity","NaN"]}]}')
       expect(direct).not.toContain("$ref")
     }).pipe(Effect.scoped, Effect.provide(toolNode)),
+  )
+
+  it.effect("bounds configured Code Mode executions without hanging the step", () =>
+    Effect.gen(function* () {
+      const tools = yield* Tool.Service
+      yield* tools.transform((editor) =>
+        editor.add({
+          name: "wait",
+          description: "Never settles",
+          input: Schema.Struct({}),
+          execute: () => Effect.never,
+        }),
+      )
+
+      const snapshot = yield* tools.snapshot()
+      const pending = snapshot.execute({
+        sessionID: Session.ID.make("session"),
+        agent: Agent.ID.make("build"),
+        messageID: SessionMessage.ID.make("message"),
+        call: {
+          type: "tool-call",
+          id: "execute",
+          name: "execute",
+          input: { code: "return await tools.wait({})" },
+        },
+      }).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* TestClock.adjust("1 millis")
+      const result = yield* Fiber.join(pending)
+
+      expect(result.output).toMatchObject({ error: true })
+      expect(result.content).toContainEqual({ type: "text", text: "Execution timed out after 1ms." })
+    }).pipe(Effect.scoped, Effect.provide(timeoutNode)),
   )
 })

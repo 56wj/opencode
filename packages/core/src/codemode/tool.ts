@@ -80,6 +80,7 @@ const description = [
 export const create = (
   inventory: Inventory,
   executeTool: (name: string, tool: Info, input: unknown, context: ToolContext) => Effect.Effect<Result, Error>,
+  timeoutMs?: number,
 ) => {
   return {
     name: "execute",
@@ -96,7 +97,7 @@ export const create = (
           lock.withPermit(
             Ref.updateAndGet(calls, update).pipe(Effect.tap((toolCalls) => context.progress({ toolCalls }))),
           )
-        const result = yield* runtime(inventory)
+        const result = yield* runtime(inventory, timeoutMs)
           .execute(code)
           .pipe(
             Effect.provideService(Run, {
@@ -232,10 +233,10 @@ function renderCatalog(root: CatalogNode): ReadonlyArray<CodeModeCatalog.Tool | 
 
 // Inventories are immutable snapshots, so tool definitions, schemas, and the search index are built
 // once per inventory and shared by its catalog and every execution.
-const runtimes = new WeakMap<Inventory, CodeMode.Runtime<Run>>()
+const runtimes = new WeakMap<Inventory, Map<number | undefined, CodeMode.Runtime<Run>>>()
 
-function runtime(inventory: Inventory) {
-  const cached = runtimes.get(inventory)
+function runtime(inventory: Inventory, timeoutMs?: number) {
+  const cached = runtimes.get(inventory)?.get(timeoutMs)
   if (cached) return cached
   // A path may carry namespace metadata, a callable tool, child tools, or all three.
   const root: ToolNode = { children: new Map() }
@@ -250,8 +251,15 @@ function runtime(inventory: Inventory) {
     })
   }
   const tools = renderTools(root)
-  const created = CodeMode.make<typeof tools>({ tools, extensions: [CodeModeWeb.extension], hooks: runHooks })
-  runtimes.set(inventory, created)
+  const created = CodeMode.make<typeof tools>({
+    tools,
+    extensions: [CodeModeWeb.extension],
+    hooks: runHooks,
+    ...(timeoutMs === undefined ? {} : { limits: { timeoutMs } }),
+  })
+  const entries = runtimes.get(inventory) ?? new Map<number | undefined, CodeMode.Runtime<Run>>()
+  entries.set(timeoutMs, created)
+  runtimes.set(inventory, entries)
   return created
 }
 

@@ -9,6 +9,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import type { Agent } from "./agent.js"
 import { CodeModeCatalog } from "./codemode/catalog.js"
 import { CodeModeTool } from "./codemode/tool.js"
+import { Config } from "./config.js"
 import { Image } from "./image.js"
 import { Permission } from "./permission.js"
 import { PluginHooks } from "./plugin/hooks.js"
@@ -17,6 +18,8 @@ import { SessionSchema } from "./session/schema.js"
 import { State } from "./state.js"
 import { definition, effectiveName, execute, normalizedName, normalizeContent } from "./tool/runtime.js"
 import { Wildcard } from "./util/wildcard.js"
+
+const DEFAULT_CODE_MODE_TIMEOUT_MS = 10 * 60 * 1000
 
 export class RegistrationError extends Schema.TaggedError<RegistrationError>()("Tool.RegistrationError", {
   name: Schema.String,
@@ -71,6 +74,7 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const hooks = yield* PluginHooks.Service
     const image = yield* Image.Service
+    const config = yield* Effect.serviceOption(Config.Service)
 
     type NormalizedItem = Tool.Content | "decode" | "size"
     const normalizeImages = Effect.fnUntraced(function* (content: ReadonlyArray<Tool.Content>) {
@@ -246,8 +250,11 @@ const layer = Layer.effect(
       transform: state.transform,
       reload: state.reload,
       list: () => Effect.sync(() => Array.from(state.get().tools.values())),
-      snapshot: Effect.fn("Tool.snapshot")((permissions) =>
-        Effect.sync(() => {
+      snapshot: Effect.fn("Tool.snapshot")(function* (permissions) {
+        const configured = config._tag === "Some" ? Config.latest(yield* config.value.entries(), "codemode") : undefined
+        const timeoutMs =
+          configured?.timeout === false ? undefined : (configured?.timeout ?? DEFAULT_CODE_MODE_TIMEOUT_MS)
+        return yield* Effect.sync(() => {
           const data = state.get()
           const active = new Map<string, Tool.Info>()
           const rules = permissions ?? []
@@ -269,6 +276,7 @@ const layer = Layer.effect(
                 beforeExecute(name, input, context).pipe(
                   Effect.flatMap((event) => executeTool(tool, name, event.input, context)),
                 ),
+                timeoutMs,
               )
             : undefined
           const codeModeCatalog = !codeModeEnabled
@@ -314,8 +322,8 @@ const layer = Layer.effect(
               })
             }),
           }
-        }),
-      ),
+        })
+      }),
     })
   }),
 )

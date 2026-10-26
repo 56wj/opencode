@@ -63,6 +63,16 @@ describe("Config.Entry", () => {
     })
   })
 
+  test("round-trips Code Mode timeout configuration", () => {
+    const decode = Schema.decodeUnknownSync(Config.Info)
+    const input = { codemode: { timeout: 30_000 } }
+    expect(Schema.encodeSync(Config.Info)(decode(input))).toEqual(input)
+    expect(Schema.encodeSync(Config.Info)(decode({ codemode: { timeout: false } }))).toEqual({
+      codemode: { timeout: false },
+    })
+    expect(() => decode({ codemode: { timeout: 0 } })).toThrow()
+  })
+
   test("accepts disabled, fixed, and random web search selection", () => {
     const decode = Schema.decodeUnknownSync(Config.Info)
 

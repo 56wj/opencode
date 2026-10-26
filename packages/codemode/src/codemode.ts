@@ -22,7 +22,7 @@ export { searchSignature, toolExpression } from "./tool-runtime.js"
 export type ExecutionLimits = {
   /**
    * Wall-clock milliseconds before interruption. Result delivery waits for tool cleanup.
-   * No default: absent means no timeout.
+   * No default in the reusable library: absent means no timeout. Hosts may provide a default.
    */
   readonly timeoutMs?: number
   /** Maximum number of tool calls admitted by the runtime. No default: absent means unlimited. */
