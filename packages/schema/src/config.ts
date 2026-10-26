@@ -87,7 +87,7 @@ export class Info extends Schema.Class<Info>("Config.Info")({
     description: "Conversation compaction behavior",
   }),
   codemode: ConfigCodeMode.Info.pipe(optional).annotate({
-    description: "Code Mode execution limits",
+    description: "Code Mode and nested tool execution limits",
   }),
   skills: Schema.String.pipe(Schema.Array, optional).annotate({
     description: "Additional paths or URLs to discover skills from",

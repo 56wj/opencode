@@ -74,6 +74,7 @@ export const layer = Layer.effect(
                         name: tool.name,
                         args: (input ?? {}) as Record<string, unknown>,
                         sessionID: context.sessionID,
+                        progress: context.progress,
                       })
                       .pipe(
                         Effect.catchTags({

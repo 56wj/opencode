@@ -27,6 +27,8 @@ export interface Namespace {
 interface BaseOptions {
   readonly namespace?: string
   readonly permission?: string
+  /** Maximum duration for one tool invocation. `false` disables the per-call limit. */
+  readonly timeout?: number | false
 }
 
 export type Options = BaseOptions &

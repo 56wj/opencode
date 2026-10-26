@@ -141,6 +141,12 @@ export interface Connection {
     readonly name: string
     readonly args?: Record<string, unknown>
     readonly sessionID?: Session.ID
+    readonly progress?: (update: {
+      readonly progress: number
+      readonly total?: number
+      readonly message?: string
+      readonly elapsedMs: number
+    }) => Effect.Effect<void>
   }) => Effect.Effect<CallToolResult, Error>
   readonly onClose: (callback: (reason: string) => void) => void
   readonly onSessionExpired: (callback: () => void) => void
@@ -370,6 +376,12 @@ export const connect = Effect.fnUntraced(function* (
     const execution = timeout?.execution ?? DEFAULT_EXECUTION_TIMEOUT
     const request = <A>(what: string, run: (signal: AbortSignal) => Promise<A>) =>
       Effect.tryPromise({ try: run, catch: failure }).pipe(
+        // The SDK timeout is an idle timeout when progress is enabled. This outer deadline is absolute,
+        // so a chatty server cannot keep a request alive forever.
+        Effect.timeoutOrElse({
+          duration: execution,
+          orElse: () => Effect.fail(new Error(`Timed out after ${execution}ms`)),
+        }),
         Effect.tapError((error) => Effect.logWarning(`failed to ${what}`, { server, error: error.message })),
       )
     // Listing is read-only, so a transient failure is safe to retry.
@@ -424,17 +436,33 @@ export const connect = Effect.fnUntraced(function* (
           client.getPrompt({ name: input.name, arguments: input.args ?? {} }, { signal, timeout: execution }),
         ),
       callTool: (input) =>
-        request("call MCP tool", (signal) =>
-          client.callTool(
-            {
-              name: input.name,
-              arguments: input.args ?? {},
-              ...(input.sessionID === undefined ? {} : { _meta: { "ai.opencode/sessionID": input.sessionID } }),
-            },
-            // Requesting progress keeps long calls alive under the SDK's timeout; execution is the hard wall.
-            { signal, timeout: execution, onprogress: () => {} },
-          ),
-        ).pipe(Effect.map(toCallToolResult)),
+        Effect.suspend(() => {
+          const started = Date.now()
+          return request("call MCP tool", (signal) =>
+            client.callTool(
+              {
+                name: input.name,
+                arguments: input.args ?? {},
+                ...(input.sessionID === undefined ? {} : { _meta: { "ai.opencode/sessionID": input.sessionID } }),
+              },
+              {
+                signal,
+                timeout: execution,
+                onprogress: (progress, total, message) => {
+                  if (signal.aborted || input.progress === undefined) return
+                  void Effect.runPromise(
+                    input.progress({
+                      progress,
+                      ...(total === undefined ? {} : { total }),
+                      ...(message === undefined ? {} : { message }),
+                      elapsedMs: Math.max(0, Date.now() - started),
+                    }),
+                  ).catch(() => {})
+                },
+              },
+            ),
+          ).pipe(Effect.map(toCallToolResult))
+        }),
       onClose: (callback) => {
         client.onclose = () => callback(lastError ? `Connection closed: ${lastError}` : "Connection closed")
       },

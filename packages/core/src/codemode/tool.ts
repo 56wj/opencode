@@ -10,7 +10,7 @@ import type {
   Namespace as ToolNamespace,
   Result,
 } from "@opencode/schema/tool"
-import { Context, Effect, Ref, Schema, Semaphore } from "effect"
+import { Clock, Context, Effect, Ref, Schema, Semaphore } from "effect"
 import { definition, normalizedName } from "../tool/runtime.js"
 import { CodeModeCatalog } from "./catalog.js"
 import { CodeModeWeb } from "./web.js"
@@ -25,6 +25,8 @@ const ExecuteCall = Schema.Struct({
   tool: Schema.String,
   status: Schema.Literals(["running", "completed", "error"]),
   input: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
+  metadata: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
+  elapsedMs: Schema.optionalKey(Schema.Number),
 })
 
 type ExecuteCall = typeof ExecuteCall.Type
@@ -57,7 +59,12 @@ type Tools = {
 class Run extends Context.Service<
   Run,
   {
-    readonly executeTool: (name: string, tool: Info, input: unknown) => Effect.Effect<unknown, unknown>
+    readonly executeTool: (
+      name: string,
+      tool: Info,
+      input: unknown,
+      call?: CodeMode.ToolInvocation,
+    ) => Effect.Effect<unknown, unknown>
     readonly hooks: CodeMode.Hooks
   }
 >()("@opencode/CodeModeTool/Run") {}
@@ -97,14 +104,22 @@ export const create = (
           lock.withPermit(
             Ref.updateAndGet(calls, update).pipe(Effect.tap((toolCalls) => context.progress({ toolCalls }))),
           )
+        const hooks = progressHooks(record)
         const result = yield* runtime(inventory, timeoutMs)
           .execute(code)
           .pipe(
             Effect.provideService(Run, {
-              executeTool: (name, tool, input) =>
+              executeTool: (name, tool, input, call) =>
                 Effect.gen(function* () {
                   const index = yield* Ref.getAndUpdate(callIndex, (index) => index + 1)
-                  const executed = yield* executeTool(name, tool, input, context)
+                  const nestedContext =
+                    call === undefined
+                      ? context
+                      : {
+                          ...context,
+                          progress: (update: Metadata) => hooks.progress(call, update),
+                        }
+                  const executed = yield* executeTool(name, tool, input, nestedContext)
                   const content =
                     typeof executed.content === "string"
                       ? [{ type: "text" as const, text: executed.content }]
@@ -116,7 +131,7 @@ export const create = (
                   const text = content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
                   return text === "" ? null : text
                 }),
-              hooks: progressHooks(record),
+              hooks: hooks.hooks,
             }),
           )
         const toolCalls = yield* Ref.get(calls)
@@ -155,37 +170,69 @@ export const create = (
 // Rows appear in start order; the same call object arrives at both hooks, so a call finds its row again.
 function progressHooks(record: (update: (items: Array<ExecuteCall>) => Array<ExecuteCall>) => Effect.Effect<unknown>) {
   const rows = new WeakMap<object, number>()
+  const started = new WeakMap<object, number>()
   const start = (call: object, entry: ExecuteCall) =>
-    record((items) => {
-      rows.set(call, items.length)
-      return [...items, entry]
+    Effect.gen(function* () {
+      started.set(call, yield* Clock.currentTimeMillis)
+      yield* record((items) => {
+        rows.set(call, items.length)
+        return [...items, entry]
+      })
     })
   const settle = (call: object, result: CodeMode.CallResult) => {
     const index = rows.get(call)
     if (index === undefined) return Effect.void
-    return record((items) => {
-      const next = [...items]
-      next[index] = { ...items[index], status: result.status === "success" ? "completed" : "error" }
-      return next
+    return Effect.gen(function* () {
+      const begin = started.get(call)
+      const elapsedMs = begin === undefined ? undefined : Math.max(0, (yield* Clock.currentTimeMillis) - begin)
+      yield* record((items) => {
+        const next = [...items]
+        next[index] = {
+          ...items[index],
+          status: result.status === "success" ? "completed" : "error",
+          ...(elapsedMs === undefined ? {} : { elapsedMs }),
+        }
+        return next
+      })
+    })
+  }
+  const progress = (call: object, update: Metadata) => {
+    const index = rows.get(call)
+    if (index === undefined) return Effect.void
+    return Effect.gen(function* () {
+      const begin = started.get(call)
+      const elapsedMs = begin === undefined ? undefined : Math.max(0, (yield* Clock.currentTimeMillis) - begin)
+      yield* record((items) => {
+        const next = [...items]
+        next[index] = {
+          ...items[index],
+          metadata: { ...items[index].metadata, ...update },
+          ...(elapsedMs === undefined ? {} : { elapsedMs }),
+        }
+        return next
+      })
     })
   }
   return {
-    "tool.before": (call) => {
-      const shown = displayInput(call.input)
-      return start(call, { tool: call.name, status: "running", ...(shown ? { input: shown } : {}) })
-    },
-    "tool.after": settle,
-    // Only listed extension functions get a row; anything else stays out of the TUI.
-    "extension.before": (call) => {
-      switch (call.name) {
-        case "fetch":
-          return start(call, { tool: call.name, status: "running", input: CodeModeWeb.display(call.args) })
-        default:
-          return Effect.void
-      }
-    },
-    "extension.after": settle,
-  } satisfies CodeMode.Hooks
+    hooks: {
+      "tool.before": (call) => {
+        const shown = displayInput(call.input)
+        return start(call, { tool: call.name, status: "running", ...(shown ? { input: shown } : {}) })
+      },
+      "tool.after": settle,
+      // Only listed extension functions get a row; anything else stays out of the TUI.
+      "extension.before": (call) => {
+        switch (call.name) {
+          case "fetch":
+            return start(call, { tool: call.name, status: "running", input: CodeModeWeb.display(call.args) })
+          default:
+            return Effect.void
+        }
+      },
+      "extension.after": settle,
+    } satisfies CodeMode.Hooks,
+    progress,
+  }
 }
 
 export const catalog = (inventory: Inventory) => {

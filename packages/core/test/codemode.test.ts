@@ -120,6 +120,7 @@ describe("CodeMode", () => {
           name: "wait",
           description: "Never settles",
           input: Schema.Struct({}),
+          options: { timeout: false },
           execute: () => Effect.never,
         }),
       )
@@ -141,6 +142,72 @@ describe("CodeMode", () => {
 
       expect(result.output).toMatchObject({ error: true })
       expect(result.content).toContainEqual({ type: "text", text: "Execution timed out after 1ms." })
+    }).pipe(Effect.scoped, Effect.provide(timeoutNode)),
+  )
+
+  it.effect("turns a timed out nested tool into a Code Mode tool error", () =>
+    Effect.gen(function* () {
+      const tools = yield* Tool.Service
+      yield* tools.transform((editor) =>
+        editor.add({
+          name: "wait",
+          description: "Never settles",
+          input: Schema.Struct({}),
+          execute: () => Effect.never,
+        }),
+      )
+
+      const result = yield* (yield* tools.snapshot()).execute({
+        sessionID: Session.ID.make("session_nested_timeout"),
+        agent: Agent.ID.make("build"),
+        messageID: SessionMessage.ID.make("message_nested_timeout"),
+        call: {
+          type: "tool-call",
+          id: "execute_nested_timeout",
+          name: "execute",
+          input: { code: "return await tools.wait({})" },
+        },
+      })
+
+      expect(result.output).toMatchObject({
+        error: true,
+        toolCalls: [{ tool: "wait", status: "error", elapsedMs: expect.any(Number) }],
+      })
+      expect(result.output.output).toContain('timed out after 1ms')
+    }).pipe(Effect.scoped, Effect.provide(timeoutNode)),
+  )
+
+  it.effect("keeps nested progress in the timed out call record", () =>
+    Effect.gen(function* () {
+      const tools = yield* Tool.Service
+      yield* tools.transform((editor) =>
+        editor.add({
+          name: "progress",
+          description: "Reports progress then waits",
+          input: Schema.Struct({}),
+          execute: (_input, context) => context.progress({ phase: "running" }).pipe(Effect.andThen(Effect.never)),
+        }),
+      )
+
+      const pending = (yield* tools.snapshot()).execute({
+        sessionID: Session.ID.make("session_nested_progress"),
+        agent: Agent.ID.make("build"),
+        messageID: SessionMessage.ID.make("message_nested_progress"),
+        call: {
+          type: "tool-call",
+          id: "execute_nested_progress",
+          name: "execute",
+          input: { code: "return await tools.progress({})" },
+        },
+      }).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* TestClock.adjust("1 millis")
+      const result = yield* Fiber.join(pending)
+
+      expect(result.output.toolCalls[0]).toMatchObject({
+        metadata: { phase: "running" },
+        elapsedMs: expect.any(Number),
+        status: "error",
+      })
     }).pipe(Effect.scoped, Effect.provide(timeoutNode)),
   )
 })

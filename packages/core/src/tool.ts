@@ -121,8 +121,25 @@ const layer = Layer.effect(
       name: string,
       input: unknown,
       context: Tool.Context,
+      timeoutMs?: number,
     ) {
-      const execution = yield* execute(tool, input, context).pipe(
+      const run = execute(tool, input, context)
+      const bounded =
+        timeoutMs === undefined
+          ? run
+          : run.pipe(
+              Effect.timeoutOrElse({
+                duration: timeoutMs,
+                orElse: () =>
+                  Effect.fail(
+                    new Tool.Error({
+                      message: `Tool "${name}" timed out after ${timeoutMs}ms.`,
+                      metadata: { timeout: true, timeoutMs },
+                    }),
+                  ),
+              }),
+            )
+      const execution = yield* bounded.pipe(
         Effect.map((value) => ({ value })),
         Effect.catchTag("Tool.Error", (failure) => Effect.succeed({ failure })),
       )
@@ -274,7 +291,9 @@ const layer = Layer.effect(
           const codeModeTool = codeModeEnabled
             ? CodeModeTool.create(codeModeInventory, (name, tool, input, context) =>
                 beforeExecute(name, input, context).pipe(
-                  Effect.flatMap((event) => executeTool(tool, name, event.input, context)),
+                  Effect.flatMap((event) =>
+                    executeTool(tool, name, event.input, context, toolTimeout(tool, timeoutMs)),
+                  ),
                 ),
                 timeoutMs,
               )
@@ -316,7 +335,7 @@ const layer = Layer.effect(
               if (name === "execute" && codeModeTool)
                 return yield* executeTool(codeModeTool, name, event.input, context)
               const tool = direct.get(name)
-              if (tool) return yield* executeTool(tool, name, event.input, context)
+              if (tool) return yield* executeTool(tool, name, event.input, context, toolTimeout(tool))
               return yield* new Tool.Error({
                 message: `No tool named "${name}" is currently available. Please use a tool from the available tool list.`,
               })
@@ -331,6 +350,16 @@ const layer = Layer.effect(
 const whollyDisabled = (action: string, rules: Permission.Ruleset) => {
   const rule = rules.findLast((rule) => Wildcard.match(action, rule.action))
   return rule?.resource === "*" && rule.effect === "deny"
+}
+
+/**
+ * Code Mode-visible tools inherit the Code Mode budget unless they provide an explicit override.
+ * Native tools keep their existing timing semantics; they may opt into a deadline explicitly.
+ */
+const toolTimeout = (tool: Tool.Info, fallback?: number) => {
+  if (tool.options?.timeout === false) return undefined
+  if (tool.options?.timeout !== undefined) return tool.options.timeout
+  return tool.options?.codemode === false ? undefined : fallback
 }
 
 const formatSchemaIssue = SchemaIssue.makeFormatterDefault()
